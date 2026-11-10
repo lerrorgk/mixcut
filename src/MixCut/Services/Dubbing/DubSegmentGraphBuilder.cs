@@ -36,10 +36,13 @@ public static class DubSegmentGraphBuilder
         int? bgmInputIndex = null,
         int? vocalsInputIndex = null,
         double vocalsStart = 0,
-        double vocalsEnd = 0)
+        double vocalsEnd = 0,
+        double? bgmStart = null,
+        double? bgmEnd = null)
     {
         int w = outputWidth, h = outputHeight;
-        var fpsInt = (int)Math.Round(fps);
+        // fps remains the source frame clock for trims; every intermediate shares one output clock.
+        const int fpsInt = 30;
         var parts = new List<string>();
         string F(double v) => v.ToString("F5", CultureInfo.InvariantCulture);
         string F3(double v) => v.ToString("F3", CultureInfo.InvariantCulture);
@@ -132,8 +135,9 @@ public static class DubSegmentGraphBuilder
             var padSuffix = trailingSilence > SilenceEpsilon ? $",apad=pad_dur={F3(trailingSilence)}" : "";
             if (bgmInputIndex is { } bgmIdx)
             {
-                var aStart = startFrame / fps;
-                var aEnd = endFrame / fps;
+                // 分离音轨属于原视频，替换画面的零起点不能用来裁音乐。
+                var aStart = bgmStart ?? startFrame / fps;
+                var aEnd = bgmEnd ?? endFrame / fps;
                 parts.Add($"[{dubAudioInputIndex}:a]aresample=44100,{Loudnorm}{padSuffix}[voice]");
                 parts.Add(
                     $"[{bgmIdx}:a]atrim=start={F(aStart)}:end={F(aEnd)},asetpts=PTS-STARTPTS,aresample=44100," +

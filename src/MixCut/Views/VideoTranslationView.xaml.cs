@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -89,6 +90,7 @@ public partial class VideoTranslationView : UserControl
             Progress.Visibility = Visibility.Collapsed;
             UpdateAvailability();
             if (_dirty) _saveTimer.Start();
+            QueueFramePreview();
         }
     }
 
@@ -149,8 +151,8 @@ public partial class VideoTranslationView : UserControl
         catch (Exception ex) { ShowError(ex); }
     }
 
-    private bool ConfirmTranslation() => Shared.MixCutDialog.Confirm(Window.GetWindow(this), "翻译整片字幕？",
-        "将使用设置中当前配置的 AI 模型翻译整片字幕，可能消耗该服务的 API 额度。\n识别在本机完成；译文会保存为可校对草稿。",
+    private bool ConfirmTranslation(string scope = "未完成字幕") => Shared.MixCutDialog.Confirm(Window.GetWindow(this), $"翻译{scope}？",
+        "将使用当前配置的 AI 模型，可能消耗 API 额度。\n" + (scope == "全部字幕" ? "全部重新翻译会覆盖已有校对。" : "只回写本次选择的字幕，其余校对保持不变。"),
         confirmText: "开始翻译", cancelText: "取消", icon: "💬");
 
     private async void OnProcess(object sender, RoutedEventArgs e)
@@ -163,7 +165,7 @@ public partial class VideoTranslationView : UserControl
                 var doc = _document!; ReadOptions();
                 if (doc.Cues.Count == 0) await _service.RecognizeAsync(doc, progress, ct);
                 RefreshRows();
-                await _service.TranslateAsync(doc, progress, ct);
+                await _service.TranslateCuesAsync(doc, MissingCueIds(doc), progress, ct);
                 SetStatus("✓ 整片字幕已翻译，可直接校对并导出翻译视频。", Brushes.DarkGreen);
                 ToastService.Show("整片字幕翻译完成", ToastStyle.Success);
             });
@@ -175,7 +177,7 @@ public partial class VideoTranslationView : UserControl
     {
         try
         {
-            if (Busy || _document is null || !ConfirmTranslation()) return;
+            if (Busy || _document is null || !ConfirmTranslation("全部字幕")) return;
             await RunOperationAsync(async (ct, progress) =>
             {
                 ReadOptions();
@@ -229,6 +231,7 @@ public partial class VideoTranslationView : UserControl
     private async void OnPreview(object sender, RoutedEventArgs e)
     {
         string? preview = null;
+        var previewDuration = 0.0;
         try
         {
             if (Busy || _document is null) return;
@@ -236,16 +239,63 @@ public partial class VideoTranslationView : UserControl
             {
                 ReadOptions();
                 preview = Path.Combine(FileHelper.TempDirectory, $"translation-preview-{Guid.NewGuid():N}.mp4");
-                await _service.ExportAsync(_document!, preview, progress, ct);
+                previewDuration = await _service.PreviewAsync(_document!, FrameSlider.Value, preview, progress, ct);
                 ct.ThrowIfCancellationRequested();
                 SetStatus("✓ 处理效果已生成，可播放查看字幕（成片完全无声）。", Brushes.DarkGreen);
 
             });
             if (preview is not null && File.Exists(preview) && IsLoaded && _document is not null)
-                ShowPlayer(preview, _document.Duration, "翻译效果预览");
+                ShowPlayer(preview, previewDuration, "当前位置附近的翻译效果（最多6秒）");
         }
         catch (Exception ex) { ShowError(ex); }
         finally { if (preview is not null) { try { File.Delete(preview); } catch { /* 本次预览临时文件 */ } } }
+    }
+
+    private static HashSet<int> MissingCueIds(VideoTranslationDocument doc) => doc.Cues
+        .Where(c => !c.IsTranslatedTo(doc.TargetLanguage, doc.TranslatedLanguage)).Select(c => c.Id).ToHashSet();
+
+    private async void OnTranslateCue(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (Busy || _document is null || (sender as FrameworkElement)?.DataContext is not TranslationCueRow row) return;
+            if (!ConfirmTranslation($"第 {row.Cue.Id} 句")) return;
+            await RunOperationAsync(async (ct, progress) =>
+            {
+                ReadOptions();
+                await _service.TranslateCuesAsync(_document, new HashSet<int> { row.Cue.Id }, progress, ct);
+                SetStatus($"✓ 第 {row.Cue.Id} 句已翻译，其余校对保持不变。", Brushes.DarkGreen);
+            });
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private void OnOriginalSelectionChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox { DataContext: TranslationCueRow row } box) row.SplitOffset = box.CaretIndex;
+    }
+
+    private void OnEditCue(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (Busy || _document is null || sender is not Button { DataContext: TranslationCueRow row } button) return;
+            var cue = row.Cue;
+            switch (button.Tag as string)
+            {
+                case "start-minus": row.Start -= 0.1; break;
+                case "start-plus": row.Start += 0.1; break;
+                case "end-minus": row.End -= 0.1; break;
+                case "end-plus": row.End += 0.1; break;
+                case "split": TranslationCueEditor.Split(_document, cue, row.SplitOffset); break;
+                case "merge": TranslationCueEditor.MergeNext(_document, cue); break;
+            }
+            RefreshRows();
+            CueList.SelectedItem = _rows.FirstOrDefault(r => ReferenceEquals(r.Cue, cue));
+            FrameSlider.Value = cue.Start;
+            MarkDirty();
+        }
+        catch (Exception ex) { ShowError(ex); }
     }
 
     private void ReadOptions()
@@ -266,7 +316,7 @@ public partial class VideoTranslationView : UserControl
         else
         {
             _loading = true;
-            try { _rows.Clear(); foreach (var cue in doc.Cues) _rows.Add(new TranslationCueRow(cue, MarkDirty)); }
+            try { _rows.Clear(); foreach (var cue in doc.Cues) _rows.Add(new TranslationCueRow(cue, MarkDirty, doc)); }
             finally { _loading = false; }
         }
         UpdateSummary();
@@ -275,8 +325,8 @@ public partial class VideoTranslationView : UserControl
     private void UpdateSummary()
     {
         if (_document is not { } doc) return;
-        var translated = doc.Cues.Count(c => !string.IsNullOrWhiteSpace(c.TranslatedText));
-        CueSummary.Text = $"整片 {doc.Cues.Count} 句 · 已有译文 {translated} 句。修改会自动保存；修改原文后请重新翻译。"
+        var translated = doc.Cues.Count(c => c.IsTranslatedTo(doc.TargetLanguage, doc.TranslatedLanguage));
+        CueSummary.Text = $"整片 {doc.Cues.Count} 句 · 当前语言已译 {translated} 句。修改自动保存；可单句翻译或补译未完成。"
             + (doc.TranslatedLanguage.Length > 0 && doc.TranslatedLanguage != doc.TargetLanguage ? " 目标语言已更改，请重新翻译。" : "");
     }
 
@@ -285,14 +335,13 @@ public partial class VideoTranslationView : UserControl
         if (!IsInitialized) return;
         var hasDocument = _document is not null;
         var hasCues = _document?.Cues.Count > 0;
-        var ready = hasCues && _document!.TranslatedLanguage == _document.TargetLanguage
-            && _document.Cues.All(c => !string.IsNullOrWhiteSpace(c.TranslatedText));
+        var ready = hasCues && MissingCueIds(_document!).Count == 0;
         ImportButton.IsEnabled = !Busy;
         Workspace.IsEnabled = hasDocument && !Busy;
-        ProcessButton.Content = hasCues ? "翻译全片（复用识别）" : "识别并翻译全片";
+        ProcessButton.Content = hasCues ? "补译未完成" : "识别并翻译全片";
         TranslateButton.IsEnabled = hasCues && !Busy;
         ExportButton.IsEnabled = ready && !Busy;
-        PreviewButton.IsEnabled = ready && !Busy;
+        PreviewButton.IsEnabled = hasDocument && !Busy;
         SaveButton.IsEnabled = hasDocument && !Busy;
         OpenButton.IsEnabled = !Busy;
         CancelButton.Visibility = Busy ? Visibility.Visible : Visibility.Collapsed;
@@ -303,7 +352,7 @@ public partial class VideoTranslationView : UserControl
         if (_loading || _document is null) return;
         _dirty = true; SaveStatus.Text = "校对有更改，等待自动保存…";
         _saveTimer.Stop(); if (!Busy) _saveTimer.Start();
-        UpdateSummary(); UpdateAvailability();
+        UpdateSummary(); UpdateAvailability(); QueueFramePreview();
     }
 
     private async Task FlushSaveAsync()
@@ -340,24 +389,27 @@ public partial class VideoTranslationView : UserControl
     { if (!_loading && !Busy) { ReadOptions(); MarkDirty(); } }
     private void OnCancel(object sender, RoutedEventArgs e)
     { _operation?.Cancel(); SetStatus("正在取消，请稍候…", Brushes.DarkOrange); }
-    private void OnFrameChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    { if (!_loading && !Busy && IsLoaded) { _frameOperation?.Cancel(); _frameTimer.Stop(); _frameTimer.Start(); } }
+    private void QueueFramePreview()
+    {
+        if (_loading || Busy || !IsLoaded || _document is null) return;
+        _frameOperation?.Cancel(); _frameTimer.Stop(); _frameTimer.Start();
+    }
+    private void OnFrameChanged(object sender, RoutedPropertyChangedEventArgs<double> e) => QueueFramePreview();
     private void OnCueSelected(object sender, SelectionChangedEventArgs e)
     { if (!_loading && !Busy && CueList.SelectedItem is TranslationCueRow row) FrameSlider.Value = row.Cue.Start; }
 
     private async void OnFrameTick(object? sender, EventArgs e)
     {
-        string? image = null;
         using var operation = new CancellationTokenSource();
         try
         {
             _frameTimer.Stop();
             if (_document is not { } doc || Busy || !IsLoaded) return;
             _frameOperation?.Cancel(); _frameOperation = operation;
-            image = Path.Combine(FileHelper.TempDirectory, $"translation-frame-{Guid.NewGuid():N}.jpg");
-            await _ffmpeg.RunAsync(new[] { "-y", "-ss", FrameSlider.Value.ToString("F3", CultureInfo.InvariantCulture), "-i", doc.SourcePath,
-                "-frames:v", "1", "-vf", "scale=540:-2", image }, cancellationToken: operation.Token);
-            var bitmap = await ThumbnailCache.Shared.LoadAsync(image);
+            var bytes = await _service.PreviewFrameAsync(doc, FrameSlider.Value, operation.Token);
+            using var stream = new MemoryStream(bytes);
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
             if (!operation.IsCancellationRequested && ReferenceEquals(doc, _document) && IsLoaded) PreviewImage.Source = bitmap;
         }
         catch (OperationCanceledException) { }
@@ -366,7 +418,6 @@ public partial class VideoTranslationView : UserControl
         finally
         {
             if (ReferenceEquals(_frameOperation, operation)) _frameOperation = null;
-            if (image is not null) { try { File.Delete(image); } catch { /* 本次抽帧 */ } }
         }
     }
 
@@ -408,8 +459,21 @@ public partial class VideoTranslationView : UserControl
 public sealed class TranslationCueRow : ObservableObject
 {
     private readonly Action _changed;
+    private readonly VideoTranslationDocument? _document;
     public TranslationCue Cue { get; }
-    public TranslationCueRow(TranslationCue cue, Action changed) { Cue = cue; _changed = changed; }
+    public int SplitOffset { get; set; }
+    public TranslationCueRow(TranslationCue cue, Action changed, VideoTranslationDocument? document = null)
+    { Cue = cue; _changed = changed; _document = document; }
+    public double Start
+    {
+        get => Cue.Start;
+        set { if (_document is null) return; TranslationCueEditor.SetTime(_document, Cue, value, true); Refresh(); _changed(); }
+    }
+    public double End
+    {
+        get => Cue.End;
+        set { if (_document is null) return; TranslationCueEditor.SetTime(_document, Cue, value, false); Refresh(); _changed(); }
+    }
     public string TimeLabel => $"{Cue.Id} · {FrameTime.HumanDuration(Cue.Start)} – {FrameTime.HumanDuration(Cue.End)}";
     public string OriginalText
     {
@@ -417,14 +481,20 @@ public sealed class TranslationCueRow : ObservableObject
         set
         {
             if (value == Cue.OriginalText) return;
-            Cue.OriginalText = value; Cue.TranslatedText = "";
+            Cue.OriginalText = value; Cue.TranslatedText = ""; Cue.TranslationLanguage = "";
             OnPropertyChanged(); OnPropertyChanged(nameof(TranslatedText)); _changed();
         }
     }
     public string TranslatedText
     {
         get => Cue.TranslatedText;
-        set { if (value == Cue.TranslatedText) return; Cue.TranslatedText = value; OnPropertyChanged(); _changed(); }
+        set
+        {
+            if (value == Cue.TranslatedText) return;
+            Cue.TranslatedText = value;
+            if (_document is not null) Cue.TranslationLanguage = _document.TargetLanguage;
+            OnPropertyChanged(); _changed();
+        }
     }
-    public void Refresh() { OnPropertyChanged(nameof(OriginalText)); OnPropertyChanged(nameof(TranslatedText)); }
+    public void Refresh() { OnPropertyChanged(nameof(OriginalText)); OnPropertyChanged(nameof(TranslatedText)); OnPropertyChanged(nameof(Start)); OnPropertyChanged(nameof(End)); OnPropertyChanged(nameof(TimeLabel)); }
 }

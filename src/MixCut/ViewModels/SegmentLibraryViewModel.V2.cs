@@ -124,7 +124,7 @@ public partial class SegmentLibraryViewModel : ISegmentCardHost
             : new VideoGroupViewModel(spec.Video, cards, _dubbing);
 
     /// <summary>切项目 / 筛选 / 排序变化时调用，重建 Groups。</summary>
-    public void RebuildGroups()
+    public void RebuildGroups(bool preserveExistingGroups = false)
     {
         var rebuildSw = System.Diagnostics.Stopwatch.StartNew();
         var filtered = FilteredSegments.ToList();
@@ -135,7 +135,14 @@ public partial class SegmentLibraryViewModel : ISegmentCardHost
         var newCardIds = new HashSet<Guid>();
         foreach (var spec in specs)
         {
-            newGroups.Add(MakeGroup(spec, BuildCardsFor(spec.Segs, newCardIds)));
+            var cards = BuildCardsFor(spec.Segs, newCardIds);
+            var existing = preserveExistingGroups
+                ? Groups.FirstOrDefault(g => g.VideoId == spec.Video.Id
+                    && g.IsUserSegmentGroup == spec.IsUserGroup
+                    && g.VideoName == spec.Video.Name && g.Video.Duration == spec.Video.Duration
+                    && g.Segments.SequenceEqual(cards))
+                : null;
+            newGroups.Add(existing ?? MakeGroup(spec, cards));
         }
 
         // 清理已不需要的 CardVM
@@ -150,7 +157,7 @@ public partial class SegmentLibraryViewModel : ISegmentCardHost
         // 否则搜索/筛选每跑一次就多留一份僵尸组，配音进度事件会把它们全部唤醒（各自再查一轮库）。
         foreach (var old in Groups)
         {
-            old.Dispose();
+            if (!newGroups.Contains(old)) old.Dispose();
         }
 
         // 用增量更新代替整体替换（避免 UI 全量重建）
@@ -205,10 +212,13 @@ public partial class SegmentLibraryViewModel : ISegmentCardHost
 
     private void ReplaceGroupsInPlace(List<VideoGroupViewModel> newGroups)
     {
-        Groups.Clear();
-        foreach (var g in newGroups)
+        for (var i = Groups.Count - 1; i >= 0; i--)
+            if (!newGroups.Contains(Groups[i])) Groups.RemoveAt(i);
+        for (var i = 0; i < newGroups.Count; i++)
         {
-            Groups.Add(g);
+            var current = Groups.IndexOf(newGroups[i]);
+            if (current < 0) Groups.Insert(i, newGroups[i]);
+            else if (current != i) Groups.Move(current, i);
         }
     }
 

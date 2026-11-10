@@ -1211,6 +1211,8 @@ public partial class ExportView : UserControl, IProjectView
         List<string>? preErrors = null,
         List<(string Name, MixCut.Services.Dubbing.DubExportInput Input, string Item3)>? preFailedTasks = null)
     {
+        // 缓存仅覆盖本次批次，成功、失败或取消离开方法时统一清理。
+        using var renderCache = new MixCut.Services.Dubbing.DubExportService.BatchRenderCache();
         // #14（对齐 macOS v0.7.x）：配音组合导出同样一律串行，concurrency 恒为 1。
         var concurrency = Infrastructure.ConcurrencyPolicy.MaxExportConcurrency(tasks.Count);
 
@@ -1246,7 +1248,7 @@ public partial class ExportView : UserControl, IProjectView
             {
                 current[slot] = task.Name;
                 Report();
-                await _dubExport.ExportAsync(task.Input, task.Item3, config, p => Report(p.Progress), token);
+                await _dubExport.ExportAsync(task.Input, task.Item3, config, p => Report(p.Progress), token, renderCache);
                 Interlocked.Increment(ref success);
             }
             catch (OperationCanceledException) { canceled = true; }

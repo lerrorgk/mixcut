@@ -43,7 +43,8 @@ public sealed record DubSegmentSpec(
     string VideoPath, int StartFrame, int EndFrame, double Fps,
     IReadOnlyList<CaptionLine> CaptionLines, bool HasHardSubtitle, string MaskStyleRaw, SubtitleMaskRect MaskRect,
     bool IsVoiceLocked, string? DubAudioPath, int FreezePadFrames, double TrailingSilence,
-    string? BgmAudioPath, VocalsSlice? Vocals = null);
+    string? BgmAudioPath, VocalsSlice? Vocals = null,
+    double? BgmStart = null, double? BgmEnd = null);
 
 /// <summary>配音导出输入（整条成片）。对应 mac DubExportInput。</summary>
 public sealed record DubExportInput(IReadOnlyList<DubSegmentSpec> Segments, int MaxWidth, int MaxHeight)
@@ -119,7 +120,8 @@ public sealed record DubExportInput(IReadOnlyList<DubSegmentSpec> Segments, int 
                     IsVoiceLocked: false, DubAudioPath: chosen.AudioFilePath,
                     chosen.FreezePadFrames, chosen.TrailingSilence,
                     // BGM 模式：配音段不混原视频分离出的 bgm.wav（整片 BGM 最后统一铺）
-                    useVocalsAudio ? null : BgmPath(video)));
+                    useVocalsAudio ? null : BgmPath(video),
+                    BgmStart: segment.StartTime, BgmEnd: segment.EndTime));
             }
             else
             {

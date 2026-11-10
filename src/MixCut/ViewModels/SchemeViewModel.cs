@@ -241,6 +241,9 @@ public partial class SchemeViewModel : ObservableObject, IDisposable
 
             var allResults = (await Task.WhenAll(tasks)).OrderBy(r => r.Index).ToList();
 
+            cancellationToken.ThrowIfCancellationRequested();
+            var seenCompositions = new HashSet<string>(StringComparer.Ordinal);
+            var skippedCompositions = 0;
             // 创建数据模型。
             foreach (var (index, strategyResult, compositions) in allResults)
             {
@@ -279,11 +282,13 @@ public partial class SchemeViewModel : ObservableObject, IDisposable
                         continue;
                     }
 
-                    var matched = segIds
-                        .Select(id => string.IsNullOrEmpty(id) ? null : catalog.IdMap.GetValueOrDefault(id))
-                        .Where(s => s is not null)
-                        .Select(s => s!)
-                        .ToList();
+                    var matched = CompositionValidator.Resolve(segIds, catalog.IdMap);
+                    if (matched is null || !seenCompositions.Add(string.Join("|", matched.Select(s => s.Id))))
+                    {
+                        skippedCompositions++;
+                        _logger.LogWarning("[SchemeValidation] 跳过缺失、重复分镜或重复序列 strategy={Name} variant={Index}", strategy.Name, vi + 1);
+                        continue;
+                    }
                     var totalDuration = matched.Sum(s => s.Duration);
 
                     var scheme = new MixScheme
@@ -306,18 +311,25 @@ public partial class SchemeViewModel : ObservableObject, IDisposable
                     CreateSchemeSegments(segIds, scheme, catalog.IdMap);
                 }
 
+                if (!strategy.Schemes.Any())
+                {
+                    _context.Strategies.Remove(strategy);
+                    continue;
+                }
                 _context.SaveChanges();
                 persistedStrategyCount++;   // issue #21：该策略（含其变体/分镜）已成功落库
                 _logger.LogInformation("策略「{Name}」: {Count} 个变体",
                     strategyResult.Name, compositions?.Count ?? 0);
             }
 
+            if (persistedStrategyCount == 0) throw new InvalidOperationException("没有生成有效的视频方案，请调整素材或提示词后重试。");
             dbProject.Status = ProjectStatus.Completed;
             dbProject.UpdatedAt = DateTime.Now;
             _context.SaveChanges();
 
             LoadSchemes(project);
-            GenerationProgress = $"生成完成：{Strategies.Count} 个策略，共 {Schemes.Count} 个视频方案";
+            GenerationProgress = $"生成完成：{Strategies.Count} 个策略，共 {Schemes.Count} 个视频方案"
+                + (skippedCompositions > 0 ? $"（已跳过 {skippedCompositions} 个无效或重复方案）" : "");
         }
         catch (OperationCanceledException)
         {
@@ -405,14 +417,14 @@ public partial class SchemeViewModel : ObservableObject, IDisposable
     private static SegmentCatalog BuildSegmentCatalog(IReadOnlyList<Segment> segments)
     {
         var videoNames = new List<string>();
-        var videoIndexMap = new Dictionary<string, int>();
+        var videoIndexMap = new Dictionary<Guid, int>();
         foreach (var seg in segments)
         {
-            var name = seg.Video?.Name ?? "unknown";
-            if (!videoIndexMap.ContainsKey(name))
+            var videoId = seg.VideoId ?? Guid.Empty;
+            if (!videoIndexMap.ContainsKey(videoId))
             {
-                videoIndexMap[name] = videoNames.Count + 1;
-                videoNames.Add(name);
+                videoIndexMap[videoId] = videoNames.Count + 1;
+                videoNames.Add(seg.Video?.Name ?? "unknown");
             }
         }
 
@@ -426,14 +438,14 @@ public partial class SchemeViewModel : ObservableObject, IDisposable
         var idMap = new Dictionary<string, Segment>();
         var infoMap = new Dictionary<string, SegmentInfo>();
         var catalogLines = new List<string>();
-        var segCountPerVideo = new Dictionary<string, int>();
+        var segCountPerVideo = new Dictionary<Guid, int>();
 
         foreach (var seg in sortedSegments)
         {
-            var videoName = seg.Video?.Name ?? "unknown";
-            var vIdx = videoIndexMap.GetValueOrDefault(videoName, 1);
-            var segNum = segCountPerVideo.GetValueOrDefault(videoName) + 1;
-            segCountPerVideo[videoName] = segNum;
+            var videoId = seg.VideoId ?? Guid.Empty;
+            var vIdx = videoIndexMap.GetValueOrDefault(videoId, 1);
+            var segNum = segCountPerVideo.GetValueOrDefault(videoId) + 1;
+            segCountPerVideo[videoId] = segNum;
 
             var globalId = $"V{vIdx}_{segNum:D2}";
             idMap[globalId] = seg;
@@ -1084,3 +1096,4 @@ public partial class SchemeViewModel : ObservableObject, IDisposable
         _context = null;
     }
 }
+

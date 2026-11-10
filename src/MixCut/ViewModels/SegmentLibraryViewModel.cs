@@ -301,9 +301,18 @@ public partial class SegmentLibraryViewModel : ObservableObject, IDisposable
     /// <summary>加载项目的所有分镜。</summary>
     public void LoadSegments(Project project)
     {
-        // 切项目铁律：重置单选 + 配音检视器选中态，不让旧项目状态串过来。
-        _selectedCard = null;
-        DubInspector?.Clear();
+        var projectChanged = CurrentProject?.Id != project.Id;
+        var selectedId = projectChanged ? null : SelectedSegment?.Id;
+        if (projectChanged)
+        {
+            _selectedCard = null;
+            SelectedSegment = null;
+            DubInspector?.Clear();
+            SetSelectionMode(false);
+            Filter = new SegmentFilter();
+            SortByQuality = false;
+            PlayingSegmentId = null;
+        }
 
         _context?.Dispose();
         _context = _dbFactory.CreateDbContext();
@@ -318,8 +327,18 @@ public partial class SegmentLibraryViewModel : ObservableObject, IDisposable
 
         _segments.Clear();
         _segments.AddRange(segs);
+        var validIds = segs.Select(s => s.Id).ToHashSet();
+        SelectedSegmentIds.IntersectWith(validIds);
+        _selectionOrder.RemoveAll(id => !validIds.Contains(id));
+        SelectedSegment = selectedId is { } id ? segs.FirstOrDefault(s => s.Id == id) : null;
+        if (selectedId.HasValue && SelectedSegment is null)
+        {
+            _selectedCard = null;
+            DubInspector?.Clear();
+        }
         RecomputeNumberByVideo();
         ApplyFilter();
+        SelectionChanged?.Invoke();
     }
 
     /// <summary>

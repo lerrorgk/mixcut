@@ -350,35 +350,16 @@ public partial class ImportViewModel : ObservableObject
         IsProcessing = true;
         ErrorMessage = null;
 
-        // 去重：跳过已在当前项目中的视频。
-        var deduped = new List<string>();
-        var skipped = new List<string>();
+        // 素材身份只看内容；预筛结果携带哈希供实际导入复用。
+        List<(string Path, string? Hash)> deduped;
+        List<string> skipped;
         await using (var db = await _dbFactory.CreateDbContextAsync())
         {
-            var existing = await db.Projects
-                .Include(p => p.ProjectVideos).ThenInclude(pv => pv.Video!)
-                .Where(p => p.Id == projectId)
-                .SelectMany(p => p.ProjectVideos)
-                .Select(pv => new { pv.Video!.Name, pv.Video.ContentHash })
+            var existingHashes = await db.ProjectVideos
+                .Where(pv => pv.ProjectId == projectId && pv.Video!.ContentHash != null)
+                .Select(pv => pv.Video!.ContentHash!)
                 .ToListAsync();
-            var existingNames = existing.Select(e => e.Name).ToHashSet();
-            var existingHashes = existing.Where(e => e.ContentHash != null)
-                .Select(e => e.ContentHash!).ToHashSet();
-
-            foreach (var path in paths)
-            {
-                var name = Path.GetFileName(path);
-                // hash 读 head+tail 各 4MB + SHA256，放线程池避免阻塞 UI（§5 UI 永不卡顿）。
-                var hash = await Task.Run(() => ComputeFileHash(path));
-                if (existingNames.Contains(name) || (hash != null && existingHashes.Contains(hash)))
-                {
-                    skipped.Add(name);
-                }
-                else
-                {
-                    deduped.Add(path);
-                }
-            }
+            (deduped, skipped) = await PrepareImportBatchAsync(paths, existingHashes);
         }
 
         if (skipped.Count > 0)
@@ -395,7 +376,7 @@ public partial class ImportViewModel : ObservableObject
             ErrorMessage = $"已跳过重复视频：{list}";
         }
 
-        if (!CheckDiskSpace(deduped))
+        if (!CheckDiskSpace(deduped.Select(item => item.Path).ToList()))
         {
             IsProcessing = false;
             return;
@@ -404,24 +385,24 @@ public partial class ImportViewModel : ObservableObject
         SetProjectStatus(projectId, ProjectStatus.Importing);
 
         // 阶段 1：快速创建/关联视频实体。
-        var videosToAnalyze = new List<Guid>();
+        var videosToAnalyze = new HashSet<Guid>();
         for (var index = 0; index < deduped.Count; index++)
         {
+            var item = deduped[index];
             ProgressDescription = $"导入第 {index + 1}/{deduped.Count} 个视频...";
             Progress = (double)index / deduped.Count * 0.2;
             try
             {
-                var (videoId, needsAnalysis) = await ImportOrLinkVideoAsync(deduped[index], projectId);
+                var (videoId, needsAnalysis) = await ImportOrLinkVideoAsync(item.Path, projectId, item.Hash);
                 if (needsAnalysis)
                 {
                     videosToAnalyze.Add(videoId);
                 }
-                // 每导入一个视频立即通知 UI 刷新列表（对齐 Mac 体验：视频先出现，分析进度后跟上）
                 VideoListChanged?.Invoke();
             }
             catch (Exception ex)
             {
-                AppendError($"导入 {Path.GetFileName(deduped[index])} 失败：{ExceptionTranslator.ToUserMessage(ex)}");
+                AppendError($"导入 {Path.GetFileName(item.Path)} 失败：{ExceptionTranslator.ToUserMessage(ex)}");
             }
         }
 
@@ -494,12 +475,25 @@ public partial class ImportViewModel : ObservableObject
 
     // ---- 核心导入逻辑 ----
 
-    /// <summary>导入或关联视频。返回 (videoId, needsAnalysis)。</summary>
-    private async Task<(Guid VideoId, bool NeedsAnalysis)> ImportOrLinkVideoAsync(string path, Guid projectId)
+    internal static Task<(List<(string Path, string? Hash)> Accepted, List<string> Skipped)> PrepareImportBatchAsync(
+        IReadOnlyList<string> paths, IEnumerable<string> existingHashes) => Task.Run(() =>
+    {
+        var seen = existingHashes.ToHashSet(StringComparer.Ordinal);
+        var accepted = new List<(string Path, string? Hash)>();
+        var skipped = new List<string>();
+        foreach (var path in paths)
+        {
+            var hash = ComputeFileHash(path);
+            if (hash is not null && !seen.Add(hash)) skipped.Add(Path.GetFileName(path));
+            else accepted.Add((path, hash));
+        }
+        return (accepted, skipped);
+    });
+
+    /// <summary>导入或关联视频。预筛哈希只计算一次。</summary>
+    internal async Task<(Guid VideoId, bool NeedsAnalysis)> ImportOrLinkVideoAsync(string path, Guid projectId, string? hash)
     {
         Phase = ImportPhase.Copying;
-        // hash 计算放线程池，避免在 UI 线程同步读 8MB 阻塞界面（§5）。
-        var hash = await Task.Run(() => ComputeFileHash(path));
 
         await using var db = await _dbFactory.CreateDbContextAsync();
 
@@ -511,6 +505,8 @@ public partial class ImportViewModel : ObservableObject
                 .FirstOrDefaultAsync(v => v.ContentHash == hash);
             if (existing != null)
             {
+                if (await db.ProjectVideos.AnyAsync(pv => pv.ProjectId == projectId && pv.VideoId == existing.Id))
+                    return (existing.Id, false);
                 db.ProjectVideos.Add(new ProjectVideo { ProjectId = projectId, VideoId = existing.Id });
                 await db.SaveChangesAsync();
                 _logger.LogInformation("全局已有视频「{Name}」，直接关联到项目", existing.Name);
@@ -520,7 +516,7 @@ public partial class ImportViewModel : ObservableObject
         }
 
         // 全局没有，创建新的。
-        var destPath = FileHelper.CopyVideoToGlobal(path, hash ?? Guid.NewGuid().ToString());
+        var destPath = await Task.Run(() => FileHelper.CopyVideoToGlobal(path, hash ?? Guid.NewGuid().ToString()));
         var video = new Video
         {
             Name = Path.GetFileName(path),
@@ -881,8 +877,6 @@ public partial class ImportViewModel : ObservableObject
     /// <summary>从项目中移除视频；仅当无任何项目引用时才真正删除 Video + Segment + 磁盘文件。</summary>
     public void DeleteVideo(Guid videoId, Guid projectId)
     {
-        _cancelledVideoIds[videoId] = 0;
-
         using var db = _dbFactory.CreateDbContext();
         var video = db.Videos.Include(v => v.Segments).FirstOrDefault(v => v.Id == videoId);
         if (video is null)
@@ -890,13 +884,7 @@ public partial class ImportViewModel : ObservableObject
             return;
         }
 
-        // 处理中的视频立即标记失败，让 UI 立刻反馈。
-        if (video.Status is VideoStatus.DetectingScenes or VideoStatus.Transcribing or VideoStatus.Analyzing)
-        {
-            video.Status = VideoStatus.Failed;
-            video.ErrorMessage = "已删除";
-        }
-
+        // 先解除当前项目关联；共享素材的状态和任务属于所有引用它的项目。
         // 删除当前项目与该视频的关联。
         var links = db.ProjectVideos.Where(pv => pv.VideoId == videoId && pv.ProjectId == projectId).ToList();
         db.ProjectVideos.RemoveRange(links);
@@ -906,6 +894,7 @@ public partial class ImportViewModel : ObservableObject
         var remaining = db.ProjectVideos.Count(pv => pv.VideoId == videoId);
         if (remaining == 0)
         {
+            _cancelledVideoIds[videoId] = 0;
             var segThumbnails = video.Segments
                 .Where(s => !string.IsNullOrEmpty(s.ThumbnailPath))
                 .Select(s => s.ThumbnailPath!)

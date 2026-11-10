@@ -215,15 +215,24 @@ public sealed class VideoTranslationService
     /// 批量翻译全部字幕。按 <c>Id</c> 回填、保留时间轴；任何一条失败整批不落地，
     /// 抛错给用户重试（不回退原文，也不留「一半新一半旧」的混合译文）。
     /// </summary>
-    public async Task TranslateAsync(
+    public Task TranslateAsync(
         VideoTranslationDocument doc, IProgress<TranslationProgress>? progress = null, CancellationToken ct = default)
+        => TranslateCuesAsync(doc, null, progress, ct);
+
+    /// <summary>仅回写指定句子，完整原文仍作为上下文，其他人工校对保持不变。</summary>
+    public async Task TranslateCuesAsync(
+        VideoTranslationDocument doc, IReadOnlySet<int>? cueIds,
+        IProgress<TranslationProgress>? progress = null, CancellationToken ct = default)
     {
         EnsureSource(doc);
         if (doc.Cues.Count == 0) throw new DubException("请先识别台词，再翻译。");
         if (string.IsNullOrWhiteSpace(doc.TargetLanguage)) throw new DubException("请先选择目标语言。");
 
         // 有一条原文为空就明确报出是哪一条：静默跳过会让用户以为译完了，导出却缺这一句。
-        var blank = doc.Cues.Where(c => string.IsNullOrWhiteSpace(c.OriginalText)).ToList();
+        Normalize(doc);
+        var selected = doc.Cues.Where(c => cueIds is null || cueIds.Contains(c.Id)).ToList();
+        if (selected.Count == 0) return;
+        var blank = selected.Where(c => string.IsNullOrWhiteSpace(c.OriginalText)).ToList();
         if (blank.Count > 0)
         {
             throw new DubException(
@@ -234,20 +243,25 @@ public sealed class VideoTranslationService
 
         var items = doc.Cues.Select(c => (c.Id, c.OriginalText)).ToList();
 
-        progress?.Report(new TranslationProgress($"正在翻译 {items.Count} 条字幕…", 0));
+        progress?.Report(new TranslationProgress($"正在翻译 {selected.Count} 条字幕…", 0));
         var inner = new Progress<(int Done, int Total)>(p =>
             progress?.Report(new TranslationProgress(
                 $"翻译中 {p.Done}/{p.Total}",
                 p.Total > 0 ? (double)p.Done / p.Total : -1)));
 
-        var map = await _translation.TranslateBatchAsync(items, doc.TargetLanguage, 2, inner, ct);
+        var map = await _translation.TranslateBatchAsync(items, doc.TargetLanguage, 2, inner, ct, selected.Select(c => c.Id).ToHashSet());
 
         // 全部拿到才写回：中途失败时 doc.Cues 保持上一次可用译文。
         foreach (var cue in doc.Cues)
         {
-            if (map.TryGetValue(cue.Id, out var translated)) cue.TranslatedText = translated;
+            if (map.TryGetValue(cue.Id, out var translated))
+            {
+                cue.TranslatedText = translated;
+                cue.TranslationLanguage = doc.TargetLanguage;
+            }
         }
-        doc.TranslatedLanguage = doc.TargetLanguage;
+        doc.TranslatedLanguage = doc.Cues.All(c => c.IsTranslatedTo(doc.TargetLanguage))
+            ? doc.TargetLanguage : string.Empty;
 
         _logger.LogInformation(
             "[VideoTranslateDiag] 翻译完成 条数={Count} 目标={Lang}", map.Count, doc.TargetLanguage);
@@ -291,6 +305,7 @@ public sealed class VideoTranslationService
         IProgress<TranslationProgress>? progress = null, CancellationToken ct = default)
     {
         EnsureSource(doc);
+        Normalize(doc);
         ValidateExportable(doc);
 
         outputPath = Path.GetFullPath(outputPath);
@@ -343,6 +358,58 @@ public sealed class VideoTranslationService
         }
     }
 
+    /// <summary>当前帧效果：仅渲染这一帧的字幕，使用与完整导出相同的模糊、文字和布局。</summary>
+    public async Task<byte[]> PreviewFrameAsync(VideoTranslationDocument doc, double position, CancellationToken ct = default)
+    {
+        EnsureSource(doc);
+        var start = Math.Clamp(position, 0, Math.Max(0, doc.Duration - 1 / Math.Max(1, doc.Fps)));
+        var window = CreatePreviewWindow(doc, start, Math.Min(0.1, doc.Duration - start));
+        var workDir = CreateDir(Path.Combine(Path.GetTempPath(), $"mixcut-vt-frame-{Guid.NewGuid():N}"));
+        try
+        {
+            var strip = await Task.Run(() => BuildCaptionStrip(window, workDir, ct), ct);
+            var image = Path.Combine(workDir, "preview.png");
+            await _ffmpeg.RunAsync(BuildExportArgs(window, strip, image, start, singleFrame: true, preview: true), cancellationToken: ct);
+            return await File.ReadAllBytesAsync(image, ct);
+        }
+        finally { try { Directory.Delete(workDir, true); } catch { /* 临时预览 */ } }
+    }
+
+    /// <summary>当前位置附近最多六秒动态预览，不要求其他字幕已翻译。</summary>
+    public async Task<double> PreviewAsync(VideoTranslationDocument doc, double position, string outputPath,
+        IProgress<TranslationProgress>? progress = null, CancellationToken ct = default)
+    {
+        EnsureSource(doc);
+        var start = Math.Clamp(position - 0.5, 0, Math.Max(0, doc.Duration - 6));
+        var window = CreatePreviewWindow(doc, start, Math.Min(6, doc.Duration - start));
+        var workDir = CreateDir(Path.Combine(Path.GetTempPath(), $"mixcut-vt-preview-{Guid.NewGuid():N}"));
+        try
+        {
+            progress?.Report(new TranslationProgress("准备当前位置附近的字幕…"));
+            var strip = await Task.Run(() => BuildCaptionStrip(window, workDir, ct), ct);
+            await _ffmpeg.RunAsync(BuildExportArgs(window, strip, outputPath, start, preview: true),
+                totalDuration: window.Duration, onProgress: p => progress?.Report(new TranslationProgress(
+                    $"生成局部预览 {p.Percentage:F0}%", Math.Clamp(p.Percentage / 100, 0, 1))), cancellationToken: ct);
+            _logger.LogInformation("[VideoTranslateDiag] 局部预览 start={Start:F2} duration={Duration:F2}", start, window.Duration);
+            return window.Duration;
+        }
+        finally { try { Directory.Delete(workDir, true); } catch { /* 临时预览 */ } }
+    }
+
+    internal static VideoTranslationDocument CreatePreviewWindow(VideoTranslationDocument doc, double start, double duration) => new()
+    {
+        SourcePath = doc.SourcePath, Width = doc.Width, Height = doc.Height, Fps = doc.Fps, Duration = duration,
+        MaskRect = doc.MaskRect, BlurOriginalSubtitles = doc.BlurOriginalSubtitles, FontRatio = doc.FontRatio,
+        TargetLanguage = doc.TargetLanguage,
+        Cues = doc.Cues.Where(c => c.End > start && c.Start < start + duration).Select(c => new TranslationCue
+        {
+            Id = c.Id, Start = Math.Max(0, c.Start - start), End = Math.Min(duration, c.End - start),
+            OriginalText = c.OriginalText,
+            TranslatedText = c.IsTranslatedTo(doc.TargetLanguage, doc.TranslatedLanguage) ? c.TranslatedText : string.Empty,
+            TranslationLanguage = c.TranslationLanguage,
+        }).ToList(),
+    };
+
     // ---- 内部：前置校验 ----
 
     private static void EnsureSource(VideoTranslationDocument doc)
@@ -356,23 +423,11 @@ public sealed class VideoTranslationService
         if (doc.Cues.Count == 0)
             throw new DubException("还没有字幕。请先「识别台词」，再翻译，然后导出。");
 
-        if (string.IsNullOrWhiteSpace(doc.TranslatedLanguage))
-            throw new DubException("还没有译文。请先点「翻译」，否则导出的成片只有原声没有新字幕。");
-
-        if (!string.Equals(doc.TargetLanguage, doc.TranslatedLanguage, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new DubException(
-                $"当前译文是「{doc.TranslatedLanguage}」，但目标语言已改成「{doc.TargetLanguage}」。" +
-                "请重新翻译一次再导出，否则成片里会是上一种语言。");
-        }
-
-        // 只统计「有原文但没译文」的行：用户把原文清空的空行视为已废弃，不拦导出。
-        var missing = doc.Cues.Count(c =>
-            !string.IsNullOrWhiteSpace(c.OriginalText) && string.IsNullOrWhiteSpace(c.TranslatedText));
+        var missing = doc.Cues.Count(c => !c.IsTranslatedTo(doc.TargetLanguage, doc.TranslatedLanguage));
         if (missing > 0)
         {
             throw new DubException(
-                $"有 {missing} 条字幕还没有译文，导出会缺字幕。请重新翻译后再导出。");
+                $"有 {missing} 条字幕尚未译成当前目标语言，请先补译未完成字幕。");
         }
     }
 
@@ -403,7 +458,9 @@ public sealed class VideoTranslationService
         var nextId = doc.Cues.Count == 0 ? 1 : doc.Cues.Max(c => c.Id) + 1;
         foreach (var cue in doc.Cues)
         {
-            // 老草稿/手改 JSON 可能没有 Id：补一个单调递增的，已有 Id 一律原样保留。
+            if (string.IsNullOrEmpty(cue.TranslationLanguage) && !string.IsNullOrWhiteSpace(cue.TranslatedText))
+                cue.TranslationLanguage = doc.TranslatedLanguage;
+            // 已有 Id 一律原样保留。
             if (cue.Id <= 0) cue.Id = nextId++;
 
             cue.Start = Math.Max(0, Math.Min(cue.Start, maxEnd));
@@ -443,7 +500,7 @@ public sealed class VideoTranslationService
         {
             ct.ThrowIfCancellationRequested();
 
-            var text = CaptionRenderer.StripPunctuation(cue.TranslatedText);
+            var text = cue.TranslatedText.Trim();
             var start = Math.Max(cursor, Math.Min(cue.Start, duration));
             var end = Math.Min(Math.Max(start + 0.05, cue.End), duration);
             if (end <= start) continue;
@@ -528,7 +585,8 @@ public sealed class VideoTranslationService
     // ---- 内部：ffmpeg 参数 ----
 
     private List<string> BuildExportArgs(
-        VideoTranslationDocument doc, CaptionStrip? strip, string outputPath)
+        VideoTranslationDocument doc, CaptionStrip? strip, string outputPath,
+        double sourceStart = 0, bool singleFrame = false, bool preview = false)
     {
         var w = Math.Max(2, doc.Width);
         var h = Math.Max(2, doc.Height);
@@ -549,7 +607,9 @@ public sealed class VideoTranslationService
             videoLabel = "masked";
         }
 
-        var args = new List<string> { "-y", "-i", doc.SourcePath };
+        var args = new List<string> { "-y" };
+        if (sourceStart > 0) args.AddRange(new[] { "-ss", Fmt(sourceStart) });
+        args.AddRange(new[] { "-i", doc.SourcePath });
 
         // 字幕带是第 2 个输入（整片只 1 条流），不再按字幕条数堆输入。
         var stripIndex = 0;
@@ -569,9 +629,20 @@ public sealed class VideoTranslationService
             parts.Add($"[{videoLabel}]null[vout]");
         }
 
+        var outputLabel = "[vout]";
+        if (preview)
+        {
+            parts.Add("[vout]scale='min(540,iw)':-2[preview]");
+            outputLabel = "[preview]";
+        }
         args.Add("-filter_complex");
         args.Add(string.Join(';', parts));
-        args.AddRange(new[] { "-map", "[vout]", "-an" });
+        args.AddRange(new[] { "-map", outputLabel, "-an" });
+        if (singleFrame)
+        {
+            args.AddRange(new[] { "-frames:v", "1", outputPath });
+            return args;
+        }
         AppendVideoCodecArgs(args);
 
         args.AddRange(new[]

@@ -29,7 +29,8 @@ public sealed class DubExportService
     /// <summary>导出一条配音成片到 <paramref name="outputPath"/>。</summary>
     public async Task ExportAsync(
         DubExportInput input, string outputPath, ExportConfig? config = null,
-        Action<ExportProgress>? onProgress = null, CancellationToken ct = default)
+        Action<ExportProgress>? onProgress = null, CancellationToken ct = default,
+        BatchRenderCache? renderCache = null)
     {
         config ??= new ExportConfig();
         if (input.Segments.Count == 0) throw new DubException("没有可导出的分镜");
@@ -44,8 +45,15 @@ public sealed class DubExportService
             for (var i = 0; i < total; i++)
             {
                 onProgress?.Invoke(new ExportProgress(ExportPhase.Cutting, (double)i / total * 0.85, $"处理分镜 {i + 1}/{total}…"));
-                var inter = Path.Combine(workDir, $"seg_{i:D3}.mp4");
-                await RenderSegmentAsync(input.Segments[i], i, outW, outH, workDir, config, inter, ct);
+                var spec = input.Segments[i];
+                var fontRatio = _settings.SubtitleFontRatio;
+                var encoder = HardwareEncoderProbe.H264Hardware ?? "libx264";
+                var inter = renderCache is null
+                    ? Path.Combine(workDir, $"seg_{i:D3}.mp4")
+                    : await renderCache.GetOrRenderAsync(spec, outW, outH, config.Quality, fontRatio, encoder,
+                        (dir, path) => RenderSegmentAsync(spec, 0, outW, outH, dir, config, path, ct, fontRatio, encoder), ct);
+                if (renderCache is null)
+                    await RenderSegmentAsync(spec, i, outW, outH, workDir, config, inter, ct, fontRatio, encoder);
                 intermediates.Add(inter);
             }
 
@@ -102,7 +110,8 @@ public sealed class DubExportService
     // ---- 单分镜中间片 ----
 
     private async Task RenderSegmentAsync(DubSegmentSpec spec, int index, int outW, int outH,
-        string workDir, ExportConfig config, string outputPath, CancellationToken ct)
+        string workDir, ExportConfig config, string outputPath, CancellationToken ct,
+        double? fontRatio = null, string? encoder = null)
     {
         var mode = spec.IsVoiceLocked
             ? SubtitleMaskMode.None
@@ -123,7 +132,7 @@ public sealed class DubExportService
         {
             // 画布宽=遮挡区宽（字幕落在遮挡带内换行，下限 120px 防逐字竖排）；字号=成片宽×全局比例（与 UI 预览同源）。
             var canvasW = Math.Max(120, maskPixel.Width);
-            var fontSize = (float)SubtitleFontSize.FontSize(outW, _settings.SubtitleFontRatio);
+            var fontSize = (float)SubtitleFontSize.FontSize(outW, fontRatio ?? _settings.SubtitleFontRatio);
             var withBackdrop = mode != SubtitleMaskMode.Solid;
             for (var li = 0; li < spec.CaptionLines.Count; li++)
             {
@@ -171,9 +180,10 @@ public sealed class DubExportService
             mode, spec.StartFrame, spec.EndFrame, spec.Fps, outW, outH, maskPixel,
             captions, keepOriginalAudio, dubAudioInputIndex,
             spec.FreezePadFrames, spec.TrailingSilence, bgmInputIndex,
-            vocalsInputIndex, spec.Vocals?.Start ?? 0, spec.Vocals?.End ?? 0);
+            vocalsInputIndex, spec.Vocals?.Start ?? 0, spec.Vocals?.End ?? 0,
+            spec.BgmStart, spec.BgmEnd);
 
-        var encoder = HardwareEncoderProbe.H264Hardware ?? "libx264";
+        encoder ??= HardwareEncoderProbe.H264Hardware ?? "libx264";
         var bitrate = config.Quality.VideoBitrateKbps(ExportCodec.H264Hardware);
 
         var args = new List<string> { "-y", "-i", spec.VideoPath };
@@ -183,7 +193,7 @@ public sealed class DubExportService
         args.Add("-map"); args.Add(graph.AudioMapLabel);
         // 中间片编码参数必须完全一致，阶段二才能 -c copy。
         // -maxrate 封顶突发码率（对齐 mac，避免硬件编码码率飙高），上限取 2× 目标码率。
-        args.AddRange(new[] { "-c:v", encoder, "-b:v", $"{bitrate}k", "-maxrate", $"{bitrate * 2}k", "-pix_fmt", "yuv420p", "-tag:v", "avc1" });
+        args.AddRange(new[] { "-c:v", encoder, "-b:v", $"{bitrate}k", "-maxrate", $"{bitrate * 2}k", "-pix_fmt", "yuv420p", "-tag:v", "avc1", "-video_track_timescale", "90000" });
         // -ac 2：所有中间片统一立体声（坑1：否则原声段立体声/配音段单声道，concat 后声道不符的段静音）。
         args.AddRange(new[] { "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", outputPath });
 
@@ -238,12 +248,61 @@ public sealed class DubExportService
 
     // ---- 分辨率（9:16，偶数）----
 
-    private static (int, int) Resolution(ExportConfig config, int maxWidth, int maxHeight) => config.Resolution switch
+    internal static (int, int) Resolution(ExportConfig config, int maxWidth, int maxHeight)
     {
-        ExportResolution.Original => (maxWidth > 0 ? (maxWidth + 1) / 2 * 2 : 1080, maxHeight > 0 ? (maxHeight + 1) / 2 * 2 : 1920),
-        ExportResolution.P1080 => (1080, 1920),
-        ExportResolution.P720 => (720, 1280),
-        ExportResolution.P480 => (480, 854),
-        _ => (1080, 1920),
-    };
+        var size = ExportService.ResolveResolution(config.Resolution, maxWidth, maxHeight).Split(':');
+        return (int.Parse(size[0], CultureInfo.InvariantCulture), int.Parse(size[1], CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>一次串行配音导出批次的中间片；调用方在整批结束（含取消）后 Dispose。</summary>
+    public sealed class BatchRenderCache : IDisposable
+    {
+        private readonly Dictionary<string, string> _rendered = new();
+        private readonly string _directory = Path.Combine(Path.GetTempPath(), $"mixcut-dubbatch-{Guid.NewGuid():N}");
+        public int RenderedCount => _rendered.Count;
+        public int ReusedCount { get; private set; }
+
+        internal async Task<string> GetOrRenderAsync(
+            DubSegmentSpec spec, int width, int height, ExportQuality quality, double fontRatio, string encoder,
+            Func<string, string, Task> render, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            // JSON captures caption values, rather than the reference identity of their list.
+            var key = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                spec, width, height, quality, fontRatio, encoder,
+                video = Stamp(spec.VideoPath), dub = Stamp(spec.DubAudioPath), bgm = Stamp(spec.BgmAudioPath),
+                vocals = spec.Vocals is { } v && !string.IsNullOrEmpty(v.SourceVideoHash)
+                    ? Stamp(Path.Combine(AppPaths.StemsDirectory(v.SourceVideoHash), "vocals.wav")) : null,
+            });
+            if (_rendered.TryGetValue(key, out var existing))
+            {
+                ReusedCount++;
+                return existing;
+            }
+            var dir = Path.Combine(_directory, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var output = Path.Combine(dir, "segment.mp4");
+            await render(dir, output);
+            ct.ThrowIfCancellationRequested();
+            _rendered.Add(key, output);
+            return output;
+        }
+
+        private static object? Stamp(string? path)
+        {
+            if (path is null) return null;
+            var file = new FileInfo(path);
+            return file.Exists ? new { file.Length, file.LastWriteTimeUtc } : null;
+        }
+
+        public void Dispose()
+        {
+            Serilog.Log.Information("[DubCacheDiag] 批次结束 rendered={Rendered} reused={Reused}", RenderedCount, ReusedCount);
+            try { if (Directory.Exists(_directory)) Directory.Delete(_directory, true); }
+            catch (IOException ex) { Serilog.Log.Warning(ex, "[DubCacheDiag] 清理批次中间片失败"); }
+            catch (UnauthorizedAccessException ex) { Serilog.Log.Warning(ex, "[DubCacheDiag] 清理批次中间片失败"); }
+            _rendered.Clear();
+        }
+    }
 }

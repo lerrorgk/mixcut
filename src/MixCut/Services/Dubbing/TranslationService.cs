@@ -91,13 +91,14 @@ public sealed class TranslationService
     public async Task<IReadOnlyDictionary<int, string>> TranslateBatchAsync(
         IReadOnlyList<(int Id, string Text)> items, string targetLanguage,
         int contextLines = 2, IProgress<(int Done, int Total)>? onProgress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, IReadOnlySet<int>? translateIds = null)
     {
         if (items.Count == 0) return new Dictionary<int, string>();
         if (string.IsNullOrWhiteSpace(targetLanguage)) throw new DubException("请先选择目标语言。");
 
-        var pending = items.Where(i => !string.IsNullOrWhiteSpace(i.Text)).ToList();
-        if (pending.Count == 0) throw new DubException("没有可翻译的字幕（原文全为空）。");
+        var pending = items.Where(i => !string.IsNullOrWhiteSpace(i.Text)
+            && (translateIds is null || translateIds.Contains(i.Id))).ToList();
+        if (pending.Count == 0) return new Dictionary<int, string>();
 
         var result = new Dictionary<int, string>();
         var done = 0;

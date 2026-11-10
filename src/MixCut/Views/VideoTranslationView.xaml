@@ -5,19 +5,15 @@
  Background="{DynamicResource BgPrimaryBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
  AllowDrop="True" PreviewDragOver="OnDragOver" Drop="OnDrop">
  <UserControl.Resources>
-  <Style TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}">
-   <Setter Property="Padding" Value="12,7"/>
-  </Style>
+  <Style TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}"><Setter Property="Padding" Value="10,6"/></Style>
  </UserControl.Resources>
  <Grid Margin="24">
-  <Grid.RowDefinitions>
-   <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
-  </Grid.RowDefinitions>
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <StackPanel Margin="0,0,0,16">
    <TextBlock Text="视频翻译" FontSize="22" FontWeight="SemiBold"/>
    <TextBlock Text="整片识别与翻译 · 模糊旧字幕 · 移除全部声音 · 保持完整画面与时间顺序" Margin="0,8,0,0" TextWrapping="Wrap"/>
   </StackPanel>
-  <Border Grid.Row="1" Background="#F5F8FD" CornerRadius="8" Padding="12" Margin="0,0,0,16">
+  <Border Grid.Row="1" Background="{DynamicResource BgSecondaryBrush}" CornerRadius="8" Padding="12" Margin="0,0,0,16">
    <DockPanel>
     <Button x:Name="ImportButton" DockPanel.Dock="Left" Content="选择视频" Click="OnImport" Margin="0,0,12,0"/>
     <TextBlock x:Name="FileInfoText" Text="将一个完整视频拖到这里，或点击选择；无需创建项目或分析分镜。" VerticalAlignment="Center" TextWrapping="Wrap"/>
@@ -27,22 +23,21 @@
    <Grid.ColumnDefinitions><ColumnDefinition Width="260"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel>
-     <TextBlock Text="画面与旧字幕区域" FontWeight="SemiBold" Margin="0,0,0,8"/>
+     <TextBlock Text="字幕效果与旧字幕区域" FontWeight="SemiBold" Margin="0,0,0,8"/>
      <Viewbox Stretch="Uniform" MaxHeight="280" HorizontalAlignment="Center">
       <Grid x:Name="PreviewCanvas" Width="260" Height="462.22" Background="Black">
-       <Image x:Name="PreviewImage" Stretch="Fill"/>
-       <mask:SubtitleMaskOverlay x:Name="MaskOverlay"/>
+       <Image x:Name="PreviewImage" Stretch="Fill"/><mask:SubtitleMaskOverlay x:Name="MaskOverlay"/>
       </Grid>
      </Viewbox>
-     <Slider x:Name="FrameSlider" Minimum="0" Maximum="1" ValueChanged="OnFrameChanged" Margin="0,8,0,0" ToolTip="选择用于调整字幕区域的原片画面"/>
+     <Slider x:Name="FrameSlider" Minimum="0" Maximum="1" ValueChanged="OnFrameChanged" Margin="0,8,0,0" ToolTip="查看当前位置的模糊与翻译字幕效果"/>
      <Button Content="播放完整原片" Click="OnPlayOriginal" Margin="0,8,0,0"/>
      <CheckBox x:Name="BlurCheck" Content="模糊旧字幕区域" IsChecked="True" Click="OnOptionsChanged" Margin="0,16,0,8"/>
-     <TextBlock Text="上下拖动框移动区域，拖底部手柄调整高度；此设置应用到整片。" FontSize="11" TextWrapping="Wrap" Foreground="#666"/>
+     <TextBlock Text="上下拖动框移动区域，拖底部手柄调整高度；设置应用到整片，预览自动更新。" FontSize="11" TextWrapping="Wrap"/>
      <TextBlock Text="翻译字幕字号" Margin="0,16,0,4"/>
      <Slider x:Name="FontSlider" Minimum="0.03" Maximum="0.085" Value="0.05" ValueChanged="OnFontChanged"/>
-           <TextBlock Text="成片完全无声" FontWeight="SemiBold" Margin="0,16,0,4"/>
-      <TextBlock Text="导出时移除所有原声和背景音乐，仅保留画面与翻译字幕。" FontSize="11" TextWrapping="Wrap" Foreground="#666" Margin="0,6,0,8"/>
-</StackPanel>
+     <TextBlock Text="成片完全无声" FontWeight="SemiBold" Margin="0,16,0,4"/>
+     <TextBlock Text="导出时移除所有原声和背景音乐，仅保留画面与翻译字幕。" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,8"/>
+    </StackPanel>
    </ScrollViewer>
    <Grid Grid.Column="2">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -50,25 +45,36 @@
      <TextBlock Text="翻译成" VerticalAlignment="Center" Margin="0,0,8,8"/>
      <ComboBox x:Name="LanguagePicker" DisplayMemberPath="Label" MinWidth="100" SelectionChanged="OnLanguageChanged" Margin="0,0,8,8"/>
      <Button x:Name="ProcessButton" Style="{StaticResource PrimaryButtonStyle}" Content="识别并翻译全片" Click="OnProcess" Padding="12,7" Margin="0,0,8,8"/>
-     <Button x:Name="TranslateButton" Content="翻译全部字幕" Click="OnTranslate" Margin="0,0,8,8"/>
+     <Button x:Name="TranslateButton" Content="全部重新翻译" Click="OnTranslate" Margin="0,0,8,8"/>
      <Button x:Name="RecognizeButton" Content="仅识别 / 重新识别" Click="OnRecognize" Margin="0,0,8,8"/>
     </WrapPanel>
-    <TextBlock Grid.Row="1" x:Name="CueSummary" Text="识别后，整片原文与译文会按时间显示在这里，可直接校对。" TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
+    <TextBlock Grid.Row="1" x:Name="CueSummary" Text="识别后可校对文字、起止时间，拆分或合并字幕。" TextWrapping="Wrap" Margin="0,0,0,8"/>
     <ListBox Grid.Row="2" x:Name="CueList" BorderThickness="0" Background="Transparent"
-      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
-      SelectionChanged="OnCueSelected" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
-     <ListBox.ItemContainerStyle>
-      <Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/></Style>
-     </ListBox.ItemContainerStyle>
+     ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
+     SelectionChanged="OnCueSelected" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+     <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/></Style></ListBox.ItemContainerStyle>
      <ListBox.ItemTemplate>
       <DataTemplate>
-       <Border BorderBrush="#E0E6EF" BorderThickness="1" CornerRadius="8" Padding="12" Background="White">
+       <Border BorderBrush="{DynamicResource BorderPrimaryBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Background="{DynamicResource BgSecondaryBrush}">
         <StackPanel>
          <TextBlock Text="{Binding TimeLabel}" Foreground="#1D6BE5" FontWeight="SemiBold" Margin="0,0,0,8"/>
-         <TextBlock Text="原文" FontSize="11" Foreground="#777" Margin="0,0,0,4"/>
-         <TextBox Text="{Binding OriginalText, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="字幕原文" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="36"/>
-         <TextBlock Text="译文" FontSize="11" Foreground="#777" Margin="0,8,0,4"/>
+         <WrapPanel Margin="0,0,0,8">
+          <TextBlock Text="起始秒" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <TextBox Width="72" Text="{Binding Start, StringFormat=F2, ConverterCulture=en-US, ValidatesOnExceptions=True}" AutomationProperties.Name="字幕起始秒"/>
+          <Button Content="−0.1" Tag="start-minus" Click="OnEditCue"/><Button Content="+0.1" Tag="start-plus" Click="OnEditCue"/>
+          <TextBlock Text="结束秒" VerticalAlignment="Center" Margin="12,0,6,0"/>
+          <TextBox Width="72" Text="{Binding End, StringFormat=F2, ConverterCulture=en-US, ValidatesOnExceptions=True}" AutomationProperties.Name="字幕结束秒"/>
+          <Button Content="−0.1" Tag="end-minus" Click="OnEditCue"/><Button Content="+0.1" Tag="end-plus" Click="OnEditCue"/>
+         </WrapPanel>
+         <TextBlock Text="原文" FontSize="11" Margin="0,0,0,4"/>
+         <TextBox Text="{Binding OriginalText, UpdateSourceTrigger=PropertyChanged}" SelectionChanged="OnOriginalSelectionChanged" AutomationProperties.Name="字幕原文" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="36"/>
+         <TextBlock Text="译文" FontSize="11" Margin="0,8,0,4"/>
          <TextBox Text="{Binding TranslatedText, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="翻译字幕" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="40"/>
+         <WrapPanel Margin="0,8,0,0">
+          <Button Content="翻译本句" Click="OnTranslateCue" Margin="0,0,8,0"/>
+          <Button Content="拆句" Tag="split" Click="OnEditCue" ToolTip="在原文光标处拆分；未指定时居中拆分。译文和时间按比例拆分后可继续校对。" Margin="0,0,8,0"/>
+          <Button Content="与下句合并" Tag="merge" Click="OnEditCue"/>
+         </WrapPanel>
         </StackPanel>
        </Border>
       </DataTemplate>
@@ -78,11 +84,11 @@
   </Grid>
   <StackPanel Grid.Row="3" Margin="0,12,0,0">
    <TextBlock x:Name="StatusText" Text="请选择一个视频开始。" TextWrapping="Wrap"/>
-   <TextBlock x:Name="SaveStatus" Text="" FontSize="11" Foreground="#777" Margin="0,4,0,0"/>
+   <TextBlock x:Name="SaveStatus" Text="" FontSize="11" Margin="0,4,0,0"/>
    <ProgressBar x:Name="Progress" Height="5" Minimum="0" Maximum="1" Visibility="Collapsed" Margin="0,8,0,8"/>
    <WrapPanel Margin="0,8,0,0">
     <Button x:Name="ExportButton" Content="导出翻译视频" Style="{StaticResource PrimaryButtonStyle}" Click="OnExport" Padding="16,8" IsEnabled="False" Margin="0,0,8,8"/>
-    <Button x:Name="PreviewButton" Content="预览处理效果" Click="OnPreview" IsEnabled="False" Margin="0,0,8,8"/>
+    <Button x:Name="PreviewButton" Content="播放附近6秒效果" Click="OnPreview" IsEnabled="False" Margin="0,0,8,8"/>
     <Button x:Name="SaveButton" Content="保存校对" Click="OnSave" IsEnabled="False" Margin="0,0,8,8"/>
     <Button x:Name="CancelButton" Content="取消处理" Click="OnCancel" Visibility="Collapsed" Margin="0,0,8,8"/>
     <Button x:Name="OpenButton" Content="播放导出成片" Click="OnOpenOutput" Visibility="Collapsed" Margin="0,0,8,8"/>

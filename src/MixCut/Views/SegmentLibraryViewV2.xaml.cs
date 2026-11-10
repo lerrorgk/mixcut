@@ -218,20 +218,19 @@ public partial class SegmentLibraryViewV2 : UserControl, IProjectView
         // 就把 OnSegmentsChanged 的缓存失效整个吃掉了 ——
         // 复现：进过一次分镜库 → 回素材导入拖新视频 → 分析完成 → 切回分镜库，新分镜不出现，
         // 必须切到别的项目再切回来或者重启。全项目 6 个 IProjectView 里只有这个视图加了这层守卫。
+        var projectChanged = _currentProject?.Id != project.Id;
         _currentProject = project;
-
-        // 切项目：上一个项目的分镜可能正在播，先全局停播（否则切走了还在出声）。
-        Components.InlineVideoPlayer.StopAll();
-
-        _vm.SetSelectionMode(false);
-        _vm.ClearSelection();
-        // 筛选条件也必须重置：否则在 A 项目搜过「优惠」，切到 B 会拿旧搜索词过滤 B 的分镜，
-        // 界面显示「0 / 87 个分镜」+ 空状态，用户第一反应是「B 的分镜没了」。
-        ResetFilterUi();
+        if (projectChanged)
+        {
+            Components.InlineVideoPlayer.StopAll();
+            _vm.SetSelectionMode(false);
+            ResetFilterUi();
+        }
         _vm.LoadSegments(project);
         BuildTypeChips();
-        // 卡片立即渲染（黑底先出，CardVM 后台异步加载缩略图，加载完 INPC 刷新）
-        _vm.RebuildGroups();
+        _vm.RebuildGroups(preserveExistingGroups: !projectChanged);
+        Serilog.Log.Information("[RefreshDiag] 素材库刷新 projectChanged={Changed} selected={Selected}",
+            projectChanged, _vm.SelectedSegmentIds.Count);
         UpdateStats();
         UpdateSelectionToolbar();
         UpdateEmptyState();

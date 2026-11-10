@@ -4,7 +4,7 @@ namespace MixCut.Services.VideoTranslation;
 
 /// <summary>
 /// 一条整片字幕：相对视频起点的时间窗 + 原文 + 译文。
-/// 时间永远来自识别结果，翻译只改 <see cref="TranslatedText"/>，不碰时间，避免译文长短影响口型对齐。
+/// 时间可手动校对，翻译只改 <see cref="TranslatedText"/>，不碰时间，避免译文长短影响口型对齐。
 /// </summary>
 public sealed class TranslationCue
 {
@@ -17,11 +17,19 @@ public sealed class TranslationCue
     /// <summary>结束秒。</summary>
     public double End { get; set; }
 
-    /// <summary>识别出的原文（含标点，展示用；烧录时另行去标点）。</summary>
+    /// <summary>识别出的原文，保留标点。</summary>
     public string OriginalText { get; set; } = string.Empty;
 
     /// <summary>译文；空 = 尚未翻译（导出会明确报错，不回退原文）。</summary>
     public string TranslatedText { get; set; } = string.Empty;
+
+    /// <summary>该句译文使用的语言，支持分次补译和手动校对。</summary>
+    public string TranslationLanguage { get; set; } = string.Empty;
+
+    public bool IsTranslatedTo(string language, string legacyLanguage = "") =>
+        !string.IsNullOrWhiteSpace(TranslatedText) && string.Equals(
+            string.IsNullOrEmpty(TranslationLanguage) ? legacyLanguage : TranslationLanguage,
+            language, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>
