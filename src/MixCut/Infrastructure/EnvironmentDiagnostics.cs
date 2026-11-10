@@ -84,10 +84,10 @@ public static class EnvironmentDiagnostics
 
     private static (bool Ok, string[] Missing) ProbeBundledBinaries()
     {
-        // whisper-cli + ggml 一族 + ffmpeg/ffprobe 必须全在
+        // 视频、识别和人声分离引擎都必须随包提供，避免启动检查通过却漏掉配音依赖。
         var required = new[]
         {
-            "ffmpeg.exe", "ffprobe.exe", "whisper-cli.exe",
+            "ffmpeg.exe", "ffprobe.exe", "whisper-cli.exe", "demucs.exe",
             "whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll",
         };
         var missing = required

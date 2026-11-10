@@ -516,11 +516,35 @@ public sealed class ASRService
     /// <summary>模型是否可用。</summary>
     public bool IsModelAvailable() => FindModel() is not null;
 
+    // 设置页下载和素材分析共用同一个临时模型文件，必须覆盖整个下载与最终替换过程。
+    private static readonly SemaphoreSlim ModelDownloadGate = new(1, 1);
+
     /// <summary>下载 whisper 模型到本地缓存目录（自动尝试多个镜像源）。</summary>
     public async Task<string> DownloadModelIfNeededAsync(
         string modelName = "ggml-large-v3-turbo",
         Action<DownloadProgress>? onProgress = null,
         CancellationToken cancellationToken = default)
+    {
+        if (ModelDownloadGate.CurrentCount == 0)
+        {
+            _logger.LogInformation("[ModelDownloadDiag] 等待已有模型下载完成，避免重复写入临时文件");
+        }
+        await ModelDownloadGate.WaitAsync(cancellationToken);
+        try
+        {
+            // 排队期间模型可能已下载完成，进入后重新查缓存；取消等待不会取消前一个下载。
+            return await DownloadModelCoreAsync(modelName, onProgress, cancellationToken);
+        }
+        finally
+        {
+            ModelDownloadGate.Release();
+        }
+    }
+
+    private async Task<string> DownloadModelCoreAsync(
+        string modelName,
+        Action<DownloadProgress>? onProgress,
+        CancellationToken cancellationToken)
     {
         if (FindModel() is { } existing)
         {

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -71,5 +71,14 @@
     <!-- v0.5.0 配音字幕渲染：GDI+ 文字→PNG（libass-free）。Windows 自带 GDI+，self-contained 无新增 native 依赖。 -->
     <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
   </ItemGroup>
+
+  <!-- 发布缺少原生依赖时立即失败，避免只有界面编译成功却交付无法正常启动的目录。 -->
+  <Target Name="ValidateBundledBinaries" BeforeTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <RequiredBundledBinary Include="ffmpeg.exe;ffprobe.exe;whisper-cli.exe;demucs.exe;whisper.dll;ggml.dll;ggml-base.dll;ggml-cpu.dll;vcruntime140.dll;vcruntime140_1.dll;msvcp140.dll;msvcp140_1.dll;msvcp140_2.dll;concrt140.dll;vcomp140.dll" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\Resources\bin\%(RequiredBundledBinary.Identity)')"
+           Text="无法发布：缺少内置依赖 %(RequiredBundledBinary.Identity)。请先补齐 Resources\bin，避免生成无法正常运行的版本。" />
+  </Target>
 
 </Project>
