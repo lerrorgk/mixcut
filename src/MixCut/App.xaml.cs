@@ -86,6 +86,8 @@ public partial class App : Application
         services.AddSingleton<Services.Dubbing.DubExportService>();
         services.AddSingleton<Services.Dubbing.ParaformerAsrClient>();
         services.AddSingleton<Services.Dubbing.SegmentReRecognizer>();
+        services.AddSingleton<Services.Dubbing.TranslationService>();
+        services.AddSingleton<Services.VideoTranslation.VideoTranslationService>();
 
         // #22 全局 BGM 库 + 导出替换背景音乐（单例）。
         services.AddSingleton<Services.Bgm.BgmLibraryService>();

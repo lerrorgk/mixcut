@@ -24,6 +24,10 @@ public partial class MainWindow : Window
     /// <summary>记录每个视图上次 LoadProject 的 projectId，避免 nav 切换时重复加载。</summary>
     private readonly Dictionary<NavigationItem, Guid> _viewLastLoadedProjectId = new();
     private bool _suppressSelection;
+    private bool _showTranslation;
+    private bool _translationCloseReady;
+    private bool _translationClosePending;
+    private static readonly NavigationItem[] MixingItems = NavigationItemExtensions.All.Where(n => n != NavigationItem.SingleVideo).ToArray();
 
     public MainWindow(
         MainViewModel vm, AppSettings settings,
@@ -56,8 +60,11 @@ public partial class MainWindow : Window
         _ = NotifyIfExportFellBackToCpuAsync();
 
         ProjectList.ItemsSource = _vm.ProjectVM.Projects;
-        NavList.ItemsSource = NavigationItemExtensions.All.Select(n => n.LabelWithIcon()).ToList();
-        NavList.SelectedIndex = Math.Clamp(_settings.LastNavItem, 0, NavigationItemExtensions.All.Count - 1);
+        NavList.ItemsSource = MixingItems.Select(n => n.LabelWithIcon()).ToList();
+        var savedNav = _settings.LastNavItem;
+        NavList.SelectedIndex = Array.FindIndex(MixingItems, n => (int)n == savedNav) is var savedIndex && savedIndex >= 0 ? savedIndex : 0;
+        _showTranslation = savedNav == (int)NavigationItem.SingleVideo;
+        if (_showTranslation) _settings.LastNavItem = savedNav;
         UpdateNavEnabled();
 
         RefreshDepsWarning();
@@ -90,8 +97,28 @@ public partial class MainWindow : Window
     }
 
     /// <summary>关闭时记忆窗口尺寸 / 最大化状态。最大化时存 RestoreBounds（还原后的尺寸）而非屏幕尺寸。</summary>
-    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    protected override async void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
+        if (!_translationCloseReady && _views.TryGetValue(NavigationItem.SingleVideo, out var view)
+            && view is VideoTranslationView translation && translation.NeedsCloseSave)
+        {
+            e.Cancel = true;
+            if (_translationClosePending) return;
+            _translationClosePending = true;
+            try
+            {
+                await translation.PrepareToCloseAsync();
+                _translationCloseReady = true;
+                _ = Dispatcher.BeginInvoke(new Action(Close));
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Error(ex, "[VideoTranslationDiag] 关闭前保存失败");
+                Components.ToastService.Show("校对尚未保存，请重试保存后关闭。", Components.ToastStyle.Error);
+            }
+            finally { _translationClosePending = false; }
+            return;
+        }
         try
         {
             var maximized = WindowState == WindowState.Maximized;
@@ -131,14 +158,26 @@ public partial class MainWindow : Window
     {
         if (NavList.SelectedIndex >= 0)
         {
-            _vm.SelectedNavItem = NavigationItemExtensions.All[NavList.SelectedIndex];
-            _settings.LastNavItem = NavList.SelectedIndex;
+            _showTranslation = false;
+            _vm.SelectedNavItem = MixingItems[NavList.SelectedIndex];
+            _settings.LastNavItem = (int)_vm.SelectedNavItem;
         }
         UpdateContent();
     }
 
     private void UpdateContent()
     {
+        MixingNavigation.Visibility = _showTranslation ? Visibility.Collapsed : Visibility.Visible;
+        MixingModeButton.FontWeight = _showTranslation ? FontWeights.Normal : FontWeights.Bold;
+        TranslationModeButton.FontWeight = _showTranslation ? FontWeights.Bold : FontWeights.Normal;
+        MixingModeButton.Background = new System.Windows.Media.SolidColorBrush(_showTranslation ? System.Windows.Media.Colors.Transparent : System.Windows.Media.Color.FromRgb(224, 236, 255));
+        TranslationModeButton.Background = new System.Windows.Media.SolidColorBrush(_showTranslation ? System.Windows.Media.Color.FromRgb(224, 236, 255) : System.Windows.Media.Colors.Transparent);
+        if (_showTranslation)
+        {
+            _vm.SegmentVM.DubInspector?.Clear();
+            SetContentWithFade(GetView(NavigationItem.SingleVideo));
+            return;
+        }
         var project = _vm.ProjectVM.SelectedProject;
         if (project is null)
         {
@@ -207,6 +246,9 @@ public partial class MainWindow : Window
             NavigationItem.SegmentLibrary => _settings.UseNewSegmentLibrary
                 ? new SegmentLibraryViewV2(_vm.SegmentVM, _variantExportService, _settings, _services, NavigateTo)
                 : (FrameworkElement)new SegmentLibraryView(_vm.SegmentVM, _variantExportService, _settings),
+            NavigationItem.SingleVideo => new VideoTranslationView(
+                (Services.VideoTranslation.VideoTranslationService)_services.GetService(typeof(Services.VideoTranslation.VideoTranslationService))!,
+                (Services.VideoProcessing.FFmpegRunner)_services.GetService(typeof(Services.VideoProcessing.FFmpegRunner))!),
             NavigationItem.Schemes => new SchemesView(_vm.SchemeVM, _vm.SegmentVM),
             // #22：BGM 库是全局视图（不依赖项目数据），不实现 IProjectView。
             NavigationItem.BgmLibrary => new BgmLibraryView(
@@ -228,7 +270,11 @@ public partial class MainWindow : Window
     /// <summary>从内容视图请求切换导航（如概览页的快速操作按钮）。</summary>
     public void NavigateTo(NavigationItem item)
     {
-        NavList.SelectedIndex = (int)item;
+        if (item == NavigationItem.SingleVideo) { OnTranslationModeClick(this, new RoutedEventArgs()); return; }
+        _showTranslation = false;
+        NavList.SelectedIndex = Array.IndexOf(MixingItems, item);
+        _settings.LastNavItem = (int)item;
+        UpdateContent();
     }
 
     /// <summary>
@@ -243,7 +289,7 @@ public partial class MainWindow : Window
         // 失效缓存：新方案是在 Schemes 视图外创建的，缓存命中会跳过 LoadProject
         _viewLastLoadedProjectId.Remove(NavigationItem.Schemes);
 
-        NavList.SelectedIndex = (int)NavigationItem.Schemes;
+        NavigateTo(NavigationItem.Schemes);
 
         // 切到 Schemes 后 UpdateContent 已触发；这时 view 是最新的，调 SelectScheme 选中
         if (_views.TryGetValue(NavigationItem.Schemes, out var v) && v is SchemesView schemesView)
@@ -261,6 +307,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
+
             _viewLastLoadedProjectId.Remove(NavigationItem.SegmentLibrary);
             _viewLastLoadedProjectId.Remove(NavigationItem.Schemes);
             _viewLastLoadedProjectId.Remove(NavigationItem.Overview);
@@ -288,6 +335,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
+
             _viewLastLoadedProjectId.Remove(NavigationItem.Schemes);
             _viewLastLoadedProjectId.Remove(NavigationItem.Export);
             _viewLastLoadedProjectId.Remove(NavigationItem.Overview);
@@ -352,6 +400,29 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OnMixingModeClick(object sender, RoutedEventArgs e)
+    {
+        _showTranslation = false;
+        _settings.LastNavItem = (int)_vm.SelectedNavItem;
+        UpdateContent();
+    }
+
+    private void OnTranslationModeClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _showTranslation = true;
+            _settings.LastNavItem = (int)NavigationItem.SingleVideo;
+            UpdateContent();
+            Serilog.Log.Information("[VideoTranslationDiag] 独立入口 opened projectRequired=false");
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "[VideoTranslationDiag] 打开工作台失败");
+            Components.ToastService.Show(ExceptionTranslator.ToUserMessage(ex), Components.ToastStyle.Error);
+        }
+    }
+
     private void OnSettingsClick(object sender, RoutedEventArgs e) => OpenSettings();
 
     /// <summary>
@@ -406,6 +477,7 @@ public partial class MainWindow : Window
     /// <summary>点击侧边栏 logo 回到欢迎页（清掉当前选中项目）。对齐 macOS v0.2.4。</summary>
     private void OnLogoClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        _showTranslation = false;
         _vm.ProjectVM.SelectedProject = null;
         _settings.LastSelectedProjectId = null;
         ProjectList.SelectedItem = null;
@@ -498,11 +570,12 @@ public partial class MainWindow : Window
                 System.Windows.Input.Key.D4 => 3,
                 System.Windows.Input.Key.D5 => 4,
                 System.Windows.Input.Key.D6 => 5,
+                System.Windows.Input.Key.D7 => 6,
                 _ => -1,
             };
-            if (idx >= 0 && idx < NavigationItemExtensions.All.Count)
+            if (idx >= 0 && idx < MixingItems.Length && _vm.ProjectVM.SelectedProject is not null)
             {
-                NavList.SelectedIndex = idx;
+                NavigateTo(MixingItems[idx]);
                 e.Handled = true;
                 return;
             }

@@ -11,6 +11,7 @@ public enum NavigationItem
     // 注意插入会使 Export 的序号 +1，AppSettings.LastNavItem 存的旧序号会错位一次，无实害。
     BgmLibrary,
     Export,
+    SingleVideo,
 }
 
 public static class NavigationItemExtensions
@@ -22,6 +23,7 @@ public static class NavigationItemExtensions
         NavigationItem.SegmentLibrary => "分镜素材库",
         NavigationItem.Schemes => "混剪方案",
         NavigationItem.BgmLibrary => "BGM 库",
+        NavigationItem.SingleVideo => "视频翻译",
         NavigationItem.Export => "导出",
         _ => item.ToString(),
     };
@@ -34,6 +36,7 @@ public static class NavigationItemExtensions
         NavigationItem.SegmentLibrary => "🎞", // film.stack
         NavigationItem.Schemes => "📋", // list.bullet.clipboard
         NavigationItem.BgmLibrary => "🎵", // music.note.list
+        NavigationItem.SingleVideo => "💬",
         NavigationItem.Export => "⬆", // square.and.arrow.up
         _ => string.Empty,
     };

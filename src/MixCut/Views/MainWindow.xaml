@@ -105,7 +105,12 @@
 
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="12,8">
-                        <TextBlock Text="项目" FontSize="10" FontWeight="SemiBold"
+                        <Button x:Name="MixingModeButton" Content="🎞  视频混剪" Click="OnMixingModeClick"
+                                HorizontalContentAlignment="Left" Padding="12,10" Margin="0,0,0,8"/>
+                        <Button x:Name="TranslationModeButton" Content="💬  视频翻译" Click="OnTranslationModeClick"
+                                HorizontalContentAlignment="Left" Padding="12,10" Margin="0,0,0,16"/>
+                        <StackPanel x:Name="MixingNavigation">
+                        <TextBlock Text="混剪项目" FontSize="10" FontWeight="SemiBold"
                                    Foreground="#999" Margin="8,4" />
                         <ListBox x:Name="ProjectList" BorderThickness="0" Background="Transparent"
                                  SelectionChanged="OnProjectSelected"
@@ -168,6 +173,7 @@
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </DockPanel>
